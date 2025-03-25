@@ -1,0 +1,732 @@
+module riscv_processor (
+    input clk,
+    input rst
+);
+    // Fetch to Decode wires
+    wire [31:0] InstrD, PCD, PCPlus4D;
+    
+    // Decode to Execute wires
+    wire BranchE, MemReadE, MemtoRegE, MemWriteE, ALUSrcE, RegWriteE;
+    wire [1:0] ALUOpE;
+    wire [31:0] ReadData1E, ReadData2E, ImmExtE;
+    wire [31:0] InstrE;  // Instruction to Execute
+    
+    // Execute to Memory wires
+    wire BranchW, MemReadW, MemtoRegW, MemWriteW, ALUSrcW, RegWriteW, ZeroW;
+    wire [1:0] ALUOpW;
+    wire [31:0] PCTargetW, ALUResultW, ReadData2W;
+    
+    // Memory to Writeback wires
+    wire PCSrcM;
+    wire [31:0] ALUResultM, ReadDataM;
+    
+    // Writeback to Decode wire
+    wire [31:0] WriteDataW;
+
+    // Fetch Stage
+    fetch_cycle fetch (
+        .clk(clk),
+        .rst(rst),
+        .PCSrc(PCSrcM),
+        .PCTarget(PCTargetW),
+        .InstrD(InstrD),
+        .PCD(PCD),
+        .PCPlus4D(PCPlus4D)
+    );
+
+    // Decode Stage
+    decode_cycle decode (
+        .clk(clk),
+        .rst(rst),
+        .InstrD(InstrD),
+        .PCD(PCD),
+        .PCPlus4D(PCPlus4D),
+        .WriteDataW(WriteDataW),
+        .BranchE(BranchE),
+        .MemReadE(MemReadE),
+        .MemtoRegE(MemtoRegE),
+        .MemWriteE(MemWriteE),
+        .ALUSrcE(ALUSrcE),
+        .RegWriteE(RegWriteE),
+        .ALUOpE(ALUOpE),
+        .ReadData1E(ReadData1E),
+        .ReadData2E(ReadData2E),
+        .ImmExtE(ImmExtE)
+    );
+
+    // Execute Stage
+    execute_cycle execute (
+        .clk(clk),
+        .rst(rst),
+        .BranchE(BranchE),
+        .MemReadE(MemReadE),
+        .MemtoRegE(MemtoRegE),
+        .MemWriteE(MemWriteE),
+        .ALUSrcE(ALUSrcE),
+        .RegWriteE(RegWriteE),
+        .ALUOpE(ALUOpE),
+        .ReadData1E(ReadData1E),
+        .ReadData2E(ReadData2E),
+        .ImmExtE(ImmExtE),
+        .PCD(PCD),
+        .InstrE(InstrD),  // Pass instruction from Decode
+        .BranchW(BranchW),
+        .MemReadW(MemReadW),
+        .MemtoRegW(MemtoRegW),
+        .MemWriteW(MemWriteW),
+        .ALUSrcW(ALUSrcW),
+        .RegWriteW(RegWriteW),
+        .ZeroW(ZeroW),
+        .ALUOpW(ALUOpW),
+        .PCTargetW(PCTargetW),
+        .ALUResultW(ALUResultW),
+        .ReadData2W(ReadData2W)
+    );
+
+    // Memory Stage
+    memory_cycle memory (
+        .clk(clk),
+        .rst(rst),
+        .BranchW(BranchW),
+        .MemReadW(MemReadW),
+        .MemtoRegW(MemtoRegW),
+        .MemWriteW(MemWriteW),
+        .ZeroW(ZeroW),
+        .PCTargetW(PCTargetW),
+        .ALUResultW(ALUResultW),
+        .ReadData2W(ReadData2W),
+        .PCSrcM(PCSrcM),
+        .ALUResultM(ALUResultM),
+        .ReadDataM(ReadDataM)
+    );
+
+    // Writeback Stage
+    writeback wb (
+        .clk(clk),
+        .rst(rst),
+        .MemtoRegM(MemtoRegW),
+        .ALUResultM(ALUResultM),
+        .ReadDataM(ReadDataM),
+        .WriteDataW(WriteDataW)
+    );
+
+endmodule
+
+// Fetch Cycle
+module fetch_cycle(
+    input clk, rst,
+    input PCSrc,
+    input [31:0] PCTarget,
+    output [31:0] InstrD,
+    output [31:0] PCD, PCPlus4D
+);
+    wire [31:0] PCNext, PC, PCPlus4;
+    wire [31:0] Instr;
+    reg [31:0] Instr_r, PC_r, PCPlus4_r;
+
+    PC m_PC (
+        .clk(clk),
+        .rst(rst),
+        .pc_i(PCNext),
+        .pc_o(PC)
+    );
+
+    Adder m_Adder_1 (
+        .a(PC),
+        .b(32'd4),
+        .sum(PCPlus4)
+    );
+
+    InstructionMemory m_InstMem (
+        .readAddr(PC),
+        .inst(Instr)
+    );
+
+    Mux #(.size(32)) PC_MUX (
+        .sel(PCSrc),
+        .s0(PCPlus4),
+        .s1(PCTarget),
+        .out(PCNext)
+    );
+
+    always @(posedge clk or negedge rst) begin
+        if(!rst) begin
+            Instr_r <= 32'h0;
+            PC_r <= 32'h0;
+            PCPlus4_r <= 32'h0;
+        end else begin
+            Instr_r <= Instr;
+            PC_r <= PC;
+            PCPlus4_r <= PCPlus4;
+        end
+    end
+
+    assign InstrD = (!rst) ? 32'h0 : Instr_r;
+    assign PCD = (!rst) ? 32'h0 : PC_r;
+    assign PCPlus4D = (!rst) ? 32'h0 : PCPlus4_r;
+endmodule
+
+// Decode Cycle
+module decode_cycle(
+    input clk, rst,
+    input [31:0] InstrD, PCD, PCPlus4D, WriteDataW,
+    output BranchE, MemReadE, MemtoRegE, MemWriteE, ALUSrcE, RegWriteE,
+    output [1:0] ALUOpE,
+    output [31:0] ReadData1E, ReadData2E, ImmExtE
+);
+    wire [31:0] ReadData1, ReadData2, ImmExt;
+    wire [1:0] ALUOp;
+    wire Branch, MemRead, MemtoReg, MemWrite, ALUSrc, RegWrite;
+    reg [31:0] ReadData1_r, ReadData2_r, ImmExt_r;
+    reg [1:0] ALUOp_r;
+    reg Branch_r, MemRead_r, MemtoReg_r, MemWrite_r, ALUSrc_r, RegWrite_r;
+
+    Register m_Register (
+        .clk(clk),
+        .rst(rst),
+        .regWrite(RegWrite),
+        .readReg1(InstrD[19:15]),
+        .readReg2(InstrD[24:20]),
+        .writeReg(InstrD[11:7]),
+        .writeData(WriteDataW),
+        .readData1(ReadData1),
+        .readData2(ReadData2)
+    );
+
+    ImmGen m_ImmGen (
+        .inst(InstrD),
+        .imm(ImmExt)
+    );
+
+    Control m_Control (
+        .opcode(InstrD[6:0]),
+        .branch(Branch),
+        .memRead(MemRead),
+        .memtoReg(MemtoReg),
+        .ALUOp(ALUOp),
+        .memWrite(MemWrite),
+        .ALUSrc(ALUSrc),
+        .regWrite(RegWrite)
+    );
+
+    always @(posedge clk or negedge rst) begin
+        if(!rst) begin
+            Branch_r <= 1'b0;
+            MemRead_r <= 1'b0;
+            MemtoReg_r <= 1'b0;
+            MemWrite_r <= 1'b0;
+            ALUSrc_r <= 1'b0;
+            RegWrite_r <= 1'b0;
+            ALUOp_r <= 2'b00;
+            ReadData1_r <= 32'h0;
+            ReadData2_r <= 32'h0;
+            ImmExt_r <= 32'h0;
+        end else begin
+            Branch_r <= Branch;
+            MemRead_r <= MemRead;
+            MemtoReg_r <= MemtoReg;
+            MemWrite_r <= MemWrite;
+            ALUSrc_r <= ALUSrc;
+            RegWrite_r <= RegWrite;
+            ALUOp_r <= ALUOp;
+            ReadData1_r <= ReadData1;
+            ReadData2_r <= ReadData2;
+            ImmExt_r <= ImmExt;
+        end
+    end
+
+    assign BranchE = Branch_r;
+    assign MemReadE = MemRead_r;
+    assign MemtoRegE = MemtoReg_r;
+    assign MemWriteE = MemWrite_r;
+    assign ALUSrcE = ALUSrc_r;
+    assign RegWriteE = RegWrite_r;
+    assign ALUOpE = ALUOp_r;
+    assign ReadData1E = ReadData1_r;
+    assign ReadData2E = ReadData2_r;
+    assign ImmExtE = ImmExt_r;
+endmodule
+
+// Execute Cycle
+module execute_cycle(
+    input clk, rst,
+    input BranchE, MemReadE, MemtoRegE, MemWriteE, ALUSrcE, RegWriteE,
+    input [1:0] ALUOpE,
+    input [31:0] ReadData1E, ReadData2E, ImmExtE, PCD,
+    input [31:0] InstrE,  // Changed from InstrD to InstrE as input
+    output BranchW, MemReadW, MemtoRegW, MemWriteW, ALUSrcW, RegWriteW, ZeroW,
+    output [1:0] ALUOpW,
+    output [31:0] PCTargetW, ALUResultW, ReadData2W
+);
+    wire [31:0] ALUResult, ScrB, PCTarget;
+    wire [3:0] ALUCtl;
+    wire Zero;
+    reg Branch_r, MemRead_r, MemtoReg_r, MemWrite_r, ALUSrc_r, RegWrite_r, Zero_r;
+    reg [1:0] ALUOp_r;
+    reg [31:0] PCTarget_r, ALUResult_r, ReadData2_r;
+
+    ALUCtrl m_ALUCtrl (
+        .ALUOp(ALUOpE),
+        .funct7(InstrE[31:25]),  // Use input instruction
+        .funct3(InstrE[14:12]),
+        .ALUCtl(ALUCtl)
+    );
+
+    Mux #(.size(32)) m_Mux_ALU (
+        .sel(ALUSrcE),
+        .s0(ReadData2E),
+        .s1(ImmExtE),
+        .out(ScrB)
+    );
+
+    ALU m_ALU (
+        .ALUCtl(ALUCtl),
+        .A(ReadData1E),
+        .B(ScrB),
+        .ALUOut(ALUResult),
+        .zero(Zero)
+    );
+
+    Adder m_Adder_PCTarget (
+        .a(PCD),
+        .b(ImmExtE),
+        .sum(PCTarget)
+    );
+
+    always @(posedge clk or negedge rst) begin
+        if(!rst) begin
+            Branch_r <= 1'b0;
+            MemRead_r <= 1'b0;
+            MemtoReg_r <= 1'b0;
+            MemWrite_r <= 1'b0;
+            ALUSrc_r <= 1'b0;
+            RegWrite_r <= 1'b0;
+            Zero_r <= 1'b0;
+            ALUOp_r <= 2'b00;
+            PCTarget_r <= 32'h0;
+            ALUResult_r <= 32'h0;
+            ReadData2_r <= 32'h0;
+        end else begin
+            Branch_r <= BranchE;
+            MemRead_r <= MemReadE;
+            MemtoReg_r <= MemtoRegE;
+            MemWrite_r <= MemWriteE;
+            ALUSrc_r <= ALUSrcE;
+            RegWrite_r <= RegWriteE;
+            Zero_r <= Zero;
+            ALUOp_r <= ALUOpE;
+            PCTarget_r <= PCTarget;
+            ALUResult_r <= ALUResult;
+            ReadData2_r <= ReadData2E;
+        end
+    end
+
+    assign BranchW = Branch_r;
+    assign MemReadW = MemRead_r;
+    assign MemtoRegW = MemtoReg_r;
+    assign MemWriteW = MemWrite_r;
+    assign ALUSrcW = ALUSrc_r;
+    assign RegWriteW = RegWrite_r;
+    assign ZeroW = Zero_r;
+    assign ALUOpW = ALUOp_r;
+    assign PCTargetW = PCTarget_r;
+    assign ALUResultW = ALUResult_r;
+    assign ReadData2W = ReadData2_r;
+endmodule
+
+// Memory Cycle
+module memory_cycle(
+    input clk, rst,
+    input BranchW, MemReadW, MemtoRegW, MemWriteW, ZeroW,
+    input [31:0] PCTargetW, ALUResultW, ReadData2W,
+    output PCSrcM,
+    output [31:0] ALUResultM, ReadDataM
+);
+    wire [31:0] ReadData;
+    reg [31:0] ALUResult_r, ReadData_r;
+    reg PCSrc_r;
+
+    DataMemory m_DataMemory (
+        .rst(rst),
+        .clk(clk),
+        .memWrite(MemWriteW),
+        .memRead(MemReadW),
+        .address(ALUResultW),
+        .writeData(ReadData2W),
+        .readData(ReadData)
+    );
+
+    always @(posedge clk or negedge rst) begin
+        if(!rst) begin
+            ALUResult_r <= 32'h0;
+            ReadData_r <= 32'h0;
+            PCSrc_r <= 1'b0;
+        end else begin
+            ALUResult_r <= ALUResultW;
+            ReadData_r <= ReadData;
+            PCSrc_r <= BranchW & ZeroW;
+        end
+    end
+
+    assign ALUResultM = ALUResult_r;
+    assign ReadDataM = ReadData_r;
+    assign PCSrcM = PCSrc_r;
+endmodule
+
+// Writeback Cycle
+module writeback(
+    input clk, rst,
+    input MemtoRegM,
+    input [31:0] ALUResultM, ReadDataM,
+    output [31:0] WriteDataW
+);
+    Mux #(.size(32)) result_mux (
+        .sel(MemtoRegM),
+        .s0(ALUResultM),
+        .s1(ReadDataM),
+        .out(WriteDataW)
+    );
+endmodule
+
+// Supporting Modules
+module Adder (
+    input signed [31:0] a,
+    input signed [31:0] b,
+    output signed [31:0] sum
+);
+    assign sum = a + b;
+endmodule
+
+module InstructionMemory (
+    input [31:0] readAddr,
+    output [31:0] inst
+);
+    
+    // Do not modify this file!
+
+    reg [7:0] insts [127:0];
+    
+    assign inst = (readAddr >= 128) ? 32'b0 : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
+
+    initial begin
+        insts[0] = 8'b0;  insts[1] = 8'b0;  insts[2] = 8'b0;  insts[3] = 8'b0;
+        insts[4] = 8'b0;  insts[5] = 8'b0;  insts[6] = 8'b0;  insts[7] = 8'b0;
+        insts[8] = 8'b0;  insts[9] = 8'b0;  insts[10] = 8'b0; insts[11] = 8'b0;
+        insts[12] = 8'b0; insts[13] = 8'b0; insts[14] = 8'b0; insts[15] = 8'b0;
+        insts[16] = 8'b0; insts[17] = 8'b0; insts[18] = 8'b0; insts[19] = 8'b0;
+        insts[20] = 8'b0; insts[21] = 8'b0; insts[22] = 8'b0; insts[23] = 8'b0;
+        insts[24] = 8'b0; insts[25] = 8'b0; insts[26] = 8'b0; insts[27] = 8'b0;
+        insts[28] = 8'b0; insts[29] = 8'b0; insts[30] = 8'b0; insts[31] = 8'b0;
+        $readmemb("C:/Users/megha/OneDrive/Documents/4th sem/iris/iris Hardware Labs recruitment Assignment I/TEST_INSTRUCTIONS.dat", insts);
+    end
+
+endmodule
+
+
+
+
+module PC (
+    input clk,
+    input rst,
+    input [31:0] pc_i,
+    output reg [31:0] pc_o
+);
+    always @(posedge clk) begin
+        if (!rst)
+            pc_o <= 32'b0;
+        else
+            pc_o <= pc_i;
+    end
+endmodule
+
+module Mux #(
+    parameter size = 32
+) (
+    input sel,
+    input signed [size-1:0] s0,
+    input signed [size-1:0] s1,
+    output signed [size-1:0] out
+);
+    assign out = sel ? s1 : s0;
+endmodule
+
+module Control (
+    input [6:0] opcode,
+    output reg branch,
+    output reg memRead,
+    output reg memtoReg,
+    output reg [1:0] ALUOp,
+    output reg memWrite,
+    output reg ALUSrc,
+    output reg regWrite
+);
+    always @(*) begin
+        branch <= (opcode == 7'b1100011) ? 1 : 0;
+        memRead <= (opcode == 7'b0000011) ? 1 : 0;
+        memtoReg <= (opcode == 7'b0000011) ? 1 : 0;
+        ALUOp <= (opcode == 7'b1100011) ? 2'b01 :  // Branch
+                ((opcode == 7'b0110011) ? 2'b10 :  // R-type
+                ((opcode == 7'b0010011) ? 2'b10 :  // I-type
+                ((opcode == 7'b0000011 || opcode == 7'b0100011) ? 2'b00 : 2'b00))); // Load/Store
+        memWrite <= (opcode == 7'b0100011) ? 1 : 0;
+        ALUSrc <= (opcode == 7'b0010011 || opcode == 7'b0000011 || opcode == 7'b0100011) ? 1 : 0;
+        regWrite <= (opcode == 7'b0110011 || opcode == 7'b0010011 || opcode == 7'b0000011) ? 1 : 0;
+    end
+endmodule
+
+module ImmGen (
+    input [31:0] inst,
+    output reg [31:0] imm
+);
+    wire [6:0] opcode = inst[6:0];
+    always @(*) begin
+        case (opcode)
+            7'b0010011: imm <= {{20{inst[31]}}, inst[31:20]}; // I-type
+            7'b0000011: imm <= {{20{inst[31]}}, inst[31:20]}; // Load
+            7'b0100011: imm <= {{20{inst[31]}}, inst[31:25], inst[11:7]}; // S-type
+            7'b1100011: imm <= {{20{inst[31]}}, inst[7], inst[30:25], inst[11:8], 1'b0}; // B-type
+            default: imm <= 32'b0;
+        endcase
+    end
+endmodule
+
+module Register (
+    input clk,
+    input rst,
+    input regWrite,
+    input [4:0] readReg1,
+    input [4:0] readReg2,
+    input [4:0] writeReg,
+    input [31:0] writeData,
+    output [31:0] readData1,
+    output [31:0] readData2
+);
+    reg [31:0] regs [0:31];
+    assign readData1 = (readReg1 != 0) ? regs[readReg1] : 0;
+    assign readData2 = (readReg2 != 0) ? regs[readReg2] : 0;
+    
+    always @(posedge clk) begin
+        if(!rst) begin
+            regs[0] <= 0; regs[1] <= 0; regs[2] <= 32'd128; regs[3] <= 0;
+            regs[4] <= 0; regs[5] <= 0; regs[6] <= 0; regs[7] <= 0;
+            regs[8] <= 0; regs[9] <= 0; regs[10] <= 0; regs[11] <= 0;
+            regs[12] <= 0; regs[13] <= 0; regs[14] <= 0; regs[15] <= 0;
+            regs[16] <= 0; regs[17] <= 0; regs[18] <= 0; regs[19] <= 0;
+            regs[20] <= 0; regs[21] <= 0; regs[22] <= 0; regs[23] <= 0;
+            regs[24] <= 0; regs[25] <= 0; regs[26] <= 0; regs[27] <= 0;
+            regs[28] <= 0; regs[29] <= 0; regs[30] <= 0; regs[31] <= 0;
+        end
+        else if(regWrite && writeReg != 0)
+            regs[writeReg] <= writeData;
+    end
+endmodule
+
+module ALU (
+    input [3:0] ALUCtl,
+    input [31:0] A, B,
+    output reg [31:0] ALUOut,
+    output reg zero
+);
+    always @(*) begin
+        case(ALUCtl)
+            4'b0000: ALUOut = A + B;    // ADD
+            4'b0001: ALUOut = A - B;    // SUB
+            4'b0010: ALUOut = A & B;    // AND
+            4'b0011: ALUOut = A | B;    // OR
+            default: ALUOut = 32'b0;
+        endcase
+        zero = (ALUOut == 0) ? 1'b1 : 1'b0;
+    end
+endmodule
+
+module ALUCtrl (
+    input [1:0] ALUOp,
+    input [6:0] funct7,
+    input [2:0] funct3,
+    output reg [3:0] ALUCtl
+);
+    always @(*) begin
+        case(ALUOp)
+            2'b00: ALUCtl = 4'b0000;  // Add for load/store
+            2'b01: ALUCtl = 4'b0001;  // Subtract for branch
+            2'b10: begin
+                case(funct3)
+                    3'b000: ALUCtl = (funct7[5]) ? 4'b0001 : 4'b0000; // SUB/ADD
+                    3'b111: ALUCtl = 4'b0010; // AND
+                    3'b110: ALUCtl = 4'b0011; // OR
+                    default: ALUCtl = 4'b0000;
+                endcase
+            end
+            default: ALUCtl = 4'b0000;
+        endcase
+    end
+endmodule
+
+module DataMemory(
+	input rst,
+	input clk,
+	input memWrite,
+	input memRead,
+	input [31:0] address,
+	input [31:0] writeData,
+	output reg [31:0] readData
+);
+	// Do not modify this file!
+
+	reg [7:0] data_memory [127:0];
+	always @ (posedge clk) begin
+		if(~rst) begin
+			data_memory[0] <= 8'b0;
+			data_memory[1] <= 8'b0;
+			data_memory[2] <= 8'b0;
+			data_memory[3] <= 8'b0;
+			data_memory[4] <= 8'b0;
+			data_memory[5] <= 8'b0;
+			data_memory[6] <= 8'b0;
+			data_memory[7] <= 8'b0;
+			data_memory[8] <= 8'b0;
+			data_memory[9] <= 8'b0;
+			data_memory[10] <= 8'b0;
+			data_memory[11] <= 8'b0;
+			data_memory[12] <= 8'b0;
+			data_memory[13] <= 8'b0;
+			data_memory[14] <= 8'b0;
+			data_memory[15] <= 8'b0;
+			data_memory[16] <= 8'b0;
+			data_memory[17] <= 8'b0;
+			data_memory[18] <= 8'b0;
+			data_memory[19] <= 8'b0;
+			data_memory[20] <= 8'b0;
+			data_memory[21] <= 8'b0;
+			data_memory[22] <= 8'b0;
+			data_memory[23] <= 8'b0;
+			data_memory[24] <= 8'b0;
+			data_memory[25] <= 8'b0;
+			data_memory[26] <= 8'b0;
+			data_memory[27] <= 8'b0;
+			data_memory[28] <= 8'b0;
+			data_memory[29] <= 8'b0;
+			data_memory[30] <= 8'b0;
+			data_memory[31] <= 8'b0;
+			data_memory[32] <= 8'b0;
+			data_memory[33] <= 8'b0;
+			data_memory[34] <= 8'b0;
+			data_memory[35] <= 8'b0;
+			data_memory[36] <= 8'b0;
+			data_memory[37] <= 8'b0;
+			data_memory[38] <= 8'b0;
+			data_memory[39] <= 8'b0;
+			data_memory[40] <= 8'b0;
+			data_memory[41] <= 8'b0;
+			data_memory[42] <= 8'b0;
+			data_memory[43] <= 8'b0;
+			data_memory[44] <= 8'b0;
+			data_memory[45] <= 8'b0;
+			data_memory[46] <= 8'b0;
+			data_memory[47] <= 8'b0;
+			data_memory[48] <= 8'b0;
+			data_memory[49] <= 8'b0;
+			data_memory[50] <= 8'b0;
+			data_memory[51] <= 8'b0;
+			data_memory[52] <= 8'b0;
+			data_memory[53] <= 8'b0;
+			data_memory[54] <= 8'b0;
+			data_memory[55] <= 8'b0;
+			data_memory[56] <= 8'b0;
+			data_memory[57] <= 8'b0;
+			data_memory[58] <= 8'b0;
+			data_memory[59] <= 8'b0;
+			data_memory[60] <= 8'b0;
+			data_memory[61] <= 8'b0;
+			data_memory[62] <= 8'b0;
+			data_memory[63] <= 8'b0;
+			data_memory[64] <= 8'b0;
+			data_memory[65] <= 8'b0;
+			data_memory[66] <= 8'b0;
+			data_memory[67] <= 8'b0;
+			data_memory[68] <= 8'b0;
+			data_memory[69] <= 8'b0;
+			data_memory[70] <= 8'b0;
+			data_memory[71] <= 8'b0;
+			data_memory[72] <= 8'b0;
+			data_memory[73] <= 8'b0;
+			data_memory[74] <= 8'b0;
+			data_memory[75] <= 8'b0;
+			data_memory[76] <= 8'b0;
+			data_memory[77] <= 8'b0;
+			data_memory[78] <= 8'b0;
+			data_memory[79] <= 8'b0;
+			data_memory[80] <= 8'b0;
+			data_memory[81] <= 8'b0;
+			data_memory[82] <= 8'b0;
+			data_memory[83] <= 8'b0;
+			data_memory[84] <= 8'b0;
+			data_memory[85] <= 8'b0;
+			data_memory[86] <= 8'b0;
+			data_memory[87] <= 8'b0;
+			data_memory[88] <= 8'b0;
+			data_memory[89] <= 8'b0;
+			data_memory[90] <= 8'b0;
+			data_memory[91] <= 8'b0;
+			data_memory[92] <= 8'b0;
+			data_memory[93] <= 8'b0;
+			data_memory[94] <= 8'b0;
+			data_memory[95] <= 8'b0;
+			data_memory[96] <= 8'b0;
+			data_memory[97] <= 8'b0;
+			data_memory[98] <= 8'b0;
+			data_memory[99] <= 8'b0;
+			data_memory[100] <= 8'b0;
+			data_memory[101] <= 8'b0;
+			data_memory[102] <= 8'b0;
+			data_memory[103] <= 8'b0;
+			data_memory[104] <= 8'b0;
+			data_memory[105] <= 8'b0;
+			data_memory[106] <= 8'b0;
+			data_memory[107] <= 8'b0;
+			data_memory[108] <= 8'b0;
+			data_memory[109] <= 8'b0;
+			data_memory[110] <= 8'b0;
+			data_memory[111] <= 8'b0;
+			data_memory[112] <= 8'b0;
+			data_memory[113] <= 8'b0;
+			data_memory[114] <= 8'b0;
+			data_memory[115] <= 8'b0;
+			data_memory[116] <= 8'b0;
+			data_memory[117] <= 8'b0;
+			data_memory[118] <= 8'b0;
+			data_memory[119] <= 8'b0;
+			data_memory[120] <= 8'b0;
+			data_memory[121] <= 8'b0;
+			data_memory[122] <= 8'b0;
+			data_memory[123] <= 8'b0;
+			data_memory[124] <= 8'b0;
+			data_memory[125] <= 8'b0;
+			data_memory[126] <= 8'b0;
+			data_memory[127] <= 8'b0;
+		end
+		else begin
+			if(memWrite) begin
+				data_memory[address + 3] <= writeData[31:24];
+				data_memory[address + 2] <= writeData[23:16];
+				data_memory[address + 1] <= writeData[15:8];
+				data_memory[address]     <= writeData[7:0];
+			end
+
+			end
+	end       
+
+	always @(*) begin
+		if(memRead) begin
+			readData[31:24]   = data_memory[address + 3];
+			readData[23:16]   = data_memory[address + 2];
+			readData[15:8]    = data_memory[address + 1];
+			readData[7:0]     = data_memory[address];
+		end
+		else begin
+			readData          = 32'b0;
+		end
+	end
+
+endmodule
+
