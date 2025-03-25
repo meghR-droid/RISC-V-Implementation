@@ -1,0 +1,605 @@
+
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 20.03.2025 22:00:36
+// Design Name: 
+// Module Name: riscvv
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module SingleCycleCPU (
+    input clk,
+    input start
+    
+);
+
+wire [31:0] PCPlus4,PCTarget,PCNext,PC;
+wire Branch,MemRead,MemtoReg,MemWrite,ALUSrc,RegWrite,Zero,sel,CTZWrite;
+wire [3:0] ALUCtl;
+wire [1:0]ALUOp;
+wire [31:0] ALUResult,Instr,WriteData,ReadData1,ReadData2,ReadData;
+wire [4:0] ReadReg1,ReadRegG2,WriteReg;
+wire [31:0]ImmExt,Shiftout;
+wire [31:0] ScrB;
+wire [31:0] RegWriteData;
+wire [31:0] MemWriteData;
+
+PC m_PC(
+    .clk(clk),
+    .rst(start),
+    .pc_i(PCNext),
+    .pc_o(PC)
+);
+
+Adder m_Adder_1(
+    .a(PC),
+    .b(32'd4),
+    .sum(PCPlus4)
+);
+
+InstructionMemory m_InstMem(
+    .readAddr(PC),
+    .inst(Instr)
+);
+
+Control m_Control(
+    .opcode(Instr[6:0]),
+    .branch(Branch),
+    .memRead(MemRead),
+    .memtoReg(MemtoReg),
+    .ALUOp(ALUOp),
+    .memWrite(MemWrite),
+    .ALUSrc(ALUSrc),
+    .regWrite(RegWrite),
+    .CTZWrite(CTZWrite)
+);
+assign MemWriteData = ReadData2; // FIXED: Now memory write has proper data
+
+
+Register m_Register(
+    .clk(clk),
+    .rst(start),
+    .regWrite(RegWrite),
+    .readReg1(Instr[19:15]),
+    .readReg2(Instr[24:20]),
+    .writeReg(Instr[11:7]),
+    .writeData(RegWriteData),
+    .readData1(ReadData1),
+    .readData2(ReadData2)
+);
+
+
+ImmGen #(.Width(32)) m_ImmGen(
+    .inst(Instr[31:0]),
+    .imm(ImmExt)
+);
+
+ShiftLeftOne m_ShiftLeftOne(
+    .i(ImmExt),
+    .o(Shiftout)
+);
+
+Adder m_Adder_2(
+    .a(PCPlus4),
+    .b(Shiftout),
+    .sum(PCTarget)
+);
+
+Mux2to1 #(.size(32)) m_Mux_PC(
+    .sel(sel),
+    .s0(PCPlus4),
+    .s1(PCTarget),
+    .out(PCNext)
+);
+
+Mux2to1 #(.size(32)) m_Mux_ALU(
+    .sel(ALUSrc),
+    .s0(ReadData2),
+    .s1(ImmExt),
+    .out(ScrB)
+);
+
+ALUCtrl m_ALUCtrl(
+    .CTZWrite(CTZWrite),
+    .ALUOp(ALUOp),
+    .funct7(Instr[31:25]),
+    .funct3(Instr[14:12]),
+    .ALUCtl(ALUCtl)
+);
+
+ALU m_ALU(
+    .ALUCtl(ALUCtl),
+    .A(ReadData1),
+    .B(ScrB),
+    .ALUOut(ALUResult),
+    .zero(Zero)
+);
+
+DataMemory m_DataMemory(
+    .rst(start),
+    .clk(clk),
+    .memWrite(MemWrite),
+    .memRead(MemRead),
+    .address(ALUResult),
+    .writeData(MemWriteData),
+    .readData(ReadData)
+);
+
+Mux2to1 #(.size(32)) m_Mux_WriteData(
+    .sel(MemtoReg),
+    .s0(ALUResult),
+    .s1(ReadData),
+    .out(RegWriteData)
+);
+andd andgate(
+.a(Branch),
+.b(Zero),
+.c(sel)
+);
+endmodule
+module andd(
+      input a,
+      input b,
+      output c 
+      );
+  assign c=a&b;
+ endmodule
+module Adder (
+    input signed [31:0] a,
+    input signed [31:0] b,
+    output signed [31:0] sum
+);
+    // Adder computes sum = a + b
+    // The module is useful for incrementing PC 
+
+ assign sum = a + b;
+
+endmodule
+module ALU (
+    input [3:0] ALUCtl,
+    input signed [31:0] A, B,  // Declare as signed for SLT
+    output reg [31:0] ALUOut,
+    output reg zero
+);
+    integer i;
+
+    always @(*) begin
+        case (ALUCtl)
+            4'b0000: begin  // ADD (ADD, ADDI, LW, SW)
+                ALUOut = A + B;
+            end
+            4'b0010: begin  // SUB (SUB)
+                ALUOut = A - B;
+            end
+            4'b0001: begin  // BEQ, BNE (subtract for comparison)
+                ALUOut = A - B;
+            end
+            4'b0011: begin  // BLT, BGE (subtract for comparison)
+                ALUOut = A - B;
+            end
+            4'b0111: begin  // OR (OR, ORI)
+                ALUOut = A | B;
+            end
+            4'b0110: begin  // SLT (SLT, SLTI)
+                ALUOut = (A < B) ? 32'b1 : 32'b0;  // Signed comparison
+            end
+            4'b1111: begin : count_loop  // CTZ (Count Trailing Zeros)
+                ALUOut = 32'b0;
+                for (i = 0; i < 32; i = i + 1) begin
+                    if (A[i] == 1) begin
+                        disable count_loop;  // Exit when 1 is found
+                    end else begin
+                        ALUOut = ALUOut + 1;
+                    end
+                end
+            end
+            default: begin
+                ALUOut = 32'b0;  // Safe default
+            end
+        endcase
+
+        // Zero flag for branches and other operations
+        zero = (ALUCtl == 4'b0001 || ALUCtl == 4'b0011) ? (ALUOut == 32'b0) : 1'b0;
+    end
+endmodule
+
+module ALUCtrl (
+    input  [1:0] ALUOp,
+    input  [6:0] funct7,
+    input  [2:0] funct3,
+    input        CTZWrite,
+    output reg [3:0] ALUCtl
+);
+
+always @(*) begin
+    // If CTZ operation is enabled, force ALUCtl to '1111'
+    if (CTZWrite == 1) begin
+        ALUCtl = 4'b1111;  // CTZ operation
+    end else begin
+        case (ALUOp)
+            2'b00: begin 
+                // Branch operations (e.g., BEQ, BGT)
+                ALUCtl = (funct3 == 3'b010) ? 4'b0000 : 4'bxxxx;
+            end
+            2'b01: begin 
+                // Load/Store operations
+                if (funct3 == 3'b000) 
+                    ALUCtl = 4'b0000; // Load operation
+                else if (funct3 == 3'b101)
+                    ALUCtl = 4'b0011; // Store operation
+                else 
+                    ALUCtl = 4'bxxxx;
+            end
+            2'b10: begin 
+                // R-type Instructions (ADD, SUB)
+                if (funct3 == 3'b000 && funct7 == 7'b1) 
+                    ALUCtl = 4'b0010; // SUB
+                else 
+                    ALUCtl = 4'b0000; // ADD
+            end
+            2'b11: begin 
+                // I-type Arithmetic Instructions
+                case (funct3)
+                    3'b000: ALUCtl = 4'b0000; // ADDI
+                    3'b010: ALUCtl = 4'b0110; // SLTI
+                    3'b110: ALUCtl = 4'b0111; // ORI
+                    default: ALUCtl = 4'bxxxx;
+                endcase
+            end
+            default: ALUCtl = 4'b1000; // JAL (default case)
+        endcase
+    end
+end
+
+endmodule
+
+
+module Control(
+    input [6:0] opcode,
+    output reg branch,
+    output reg memRead,
+    output reg memtoReg,
+    output reg [1:0] ALUOp,
+    output reg memWrite,
+    output reg ALUSrc,
+    output reg regWrite,
+    output reg CTZWrite
+   
+);
+
+always@(*) begin
+    branch <= (opcode == 7'b1100011) ? 1 : 0;
+    memRead <= (opcode == 7'b0000011) ? 1 : 0;
+    memtoReg <= (opcode == 7'b0000011) ? 1 : 
+                (opcode == 7'b0110011 | opcode == 7'b0010011) ? 2'b10 : 1'b0;
+    ALUOp <= (opcode == 7'b0110011) ? 2'b10 : 
+             (opcode == 7'b0010011 | opcode == 7'b0000011 | opcode == 7'b1100011) ? 2'b01 : 2'b00;
+    memWrite <= (opcode == 7'b0100011) ? 1 : 0;
+    ALUSrc <= (opcode == 7'b0010011 | opcode == 7'b0000011 | opcode == 7'b0100011 | opcode == 7'b1101111) ? 1 : 0;
+    regWrite <= (opcode == 7'b0110011 | opcode == 7'b0010011) ? 1 : 0;
+    CTZWrite <= (opcode == 7'b0000000)? 1 : 0;
+end
+
+
+endmodule
+
+module DataMemory(
+	input rst,
+	input clk,
+	input memWrite,
+	input memRead,
+	input [31:0] address,
+	input [31:0] writeData,
+	output reg [31:0] readData
+);
+	// Do not modify this file!
+
+	reg [7:0] data_memory [127:0];
+	always @ (posedge clk) begin
+		if(~rst) begin
+			data_memory[0] <= 8'b0;
+			data_memory[1] <= 8'b0;
+			data_memory[2] <= 8'b0;
+			data_memory[3] <= 8'b0;
+			data_memory[4] <= 8'b0;
+			data_memory[5] <= 8'b0;
+			data_memory[6] <= 8'b0;
+			data_memory[7] <= 8'b0;
+			data_memory[8] <= 8'b0;
+			data_memory[9] <= 8'b0;
+			data_memory[10] <= 8'b0;
+			data_memory[11] <= 8'b0;
+			data_memory[12] <= 8'b0;
+			data_memory[13] <= 8'b0;
+			data_memory[14] <= 8'b0;
+			data_memory[15] <= 8'b0;
+			data_memory[16] <= 8'b0;
+			data_memory[17] <= 8'b0;
+			data_memory[18] <= 8'b0;
+			data_memory[19] <= 8'b0;
+			data_memory[20] <= 8'b0;
+			data_memory[21] <= 8'b0;
+			data_memory[22] <= 8'b0;
+			data_memory[23] <= 8'b0;
+			data_memory[24] <= 8'b0;
+			data_memory[25] <= 8'b0;
+			data_memory[26] <= 8'b0;
+			data_memory[27] <= 8'b0;
+			data_memory[28] <= 8'b0;
+			data_memory[29] <= 8'b0;
+			data_memory[30] <= 8'b0;
+			data_memory[31] <= 8'b0;
+			data_memory[32] <= 8'b0;
+			data_memory[33] <= 8'b0;
+			data_memory[34] <= 8'b0;
+			data_memory[35] <= 8'b0;
+			data_memory[36] <= 8'b0;
+			data_memory[37] <= 8'b0;
+			data_memory[38] <= 8'b0;
+			data_memory[39] <= 8'b0;
+			data_memory[40] <= 8'b0;
+			data_memory[41] <= 8'b0;
+			data_memory[42] <= 8'b0;
+			data_memory[43] <= 8'b0;
+			data_memory[44] <= 8'b0;
+			data_memory[45] <= 8'b0;
+			data_memory[46] <= 8'b0;
+			data_memory[47] <= 8'b0;
+			data_memory[48] <= 8'b0;
+			data_memory[49] <= 8'b0;
+			data_memory[50] <= 8'b0;
+			data_memory[51] <= 8'b0;
+			data_memory[52] <= 8'b0;
+			data_memory[53] <= 8'b0;
+			data_memory[54] <= 8'b0;
+			data_memory[55] <= 8'b0;
+			data_memory[56] <= 8'b0;
+			data_memory[57] <= 8'b0;
+			data_memory[58] <= 8'b0;
+			data_memory[59] <= 8'b0;
+			data_memory[60] <= 8'b0;
+			data_memory[61] <= 8'b0;
+			data_memory[62] <= 8'b0;
+			data_memory[63] <= 8'b0;
+			data_memory[64] <= 8'b0;
+			data_memory[65] <= 8'b0;
+			data_memory[66] <= 8'b0;
+			data_memory[67] <= 8'b0;
+			data_memory[68] <= 8'b0;
+			data_memory[69] <= 8'b0;
+			data_memory[70] <= 8'b0;
+			data_memory[71] <= 8'b0;
+			data_memory[72] <= 8'b0;
+			data_memory[73] <= 8'b0;
+			data_memory[74] <= 8'b0;
+			data_memory[75] <= 8'b0;
+			data_memory[76] <= 8'b0;
+			data_memory[77] <= 8'b0;
+			data_memory[78] <= 8'b0;
+			data_memory[79] <= 8'b0;
+			data_memory[80] <= 8'b0;
+			data_memory[81] <= 8'b0;
+			data_memory[82] <= 8'b0;
+			data_memory[83] <= 8'b0;
+			data_memory[84] <= 8'b0;
+			data_memory[85] <= 8'b0;
+			data_memory[86] <= 8'b0;
+			data_memory[87] <= 8'b0;
+			data_memory[88] <= 8'b0;
+			data_memory[89] <= 8'b0;
+			data_memory[90] <= 8'b0;
+			data_memory[91] <= 8'b0;
+			data_memory[92] <= 8'b0;
+			data_memory[93] <= 8'b0;
+			data_memory[94] <= 8'b0;
+			data_memory[95] <= 8'b0;
+			data_memory[96] <= 8'b0;
+			data_memory[97] <= 8'b0;
+			data_memory[98] <= 8'b0;
+			data_memory[99] <= 8'b0;
+			data_memory[100] <= 8'b0;
+			data_memory[101] <= 8'b0;
+			data_memory[102] <= 8'b0;
+			data_memory[103] <= 8'b0;
+			data_memory[104] <= 8'b0;
+			data_memory[105] <= 8'b0;
+			data_memory[106] <= 8'b0;
+			data_memory[107] <= 8'b0;
+			data_memory[108] <= 8'b0;
+			data_memory[109] <= 8'b0;
+			data_memory[110] <= 8'b0;
+			data_memory[111] <= 8'b0;
+			data_memory[112] <= 8'b0;
+			data_memory[113] <= 8'b0;
+			data_memory[114] <= 8'b0;
+			data_memory[115] <= 8'b0;
+			data_memory[116] <= 8'b0;
+			data_memory[117] <= 8'b0;
+			data_memory[118] <= 8'b0;
+			data_memory[119] <= 8'b0;
+			data_memory[120] <= 8'b0;
+			data_memory[121] <= 8'b0;
+			data_memory[122] <= 8'b0;
+			data_memory[123] <= 8'b0;
+			data_memory[124] <= 8'b0;
+			data_memory[125] <= 8'b0;
+			data_memory[126] <= 8'b0;
+			data_memory[127] <= 8'b0;
+		end
+		else begin
+			if(memWrite) begin
+				data_memory[address + 3] <= writeData[31:24];
+				data_memory[address + 2] <= writeData[23:16];
+				data_memory[address + 1] <= writeData[15:8];
+				data_memory[address]     <= writeData[7:0];
+			end
+
+			end
+	end       
+
+	always @(*) begin
+		if(memRead) begin
+			readData[31:24]   = data_memory[address + 3];
+			readData[23:16]   = data_memory[address + 2];
+			readData[15:8]    = data_memory[address + 1];
+			readData[7:0]     = data_memory[address];
+		end
+		else begin
+			readData          = 32'b0;
+		end
+	end
+
+endmodule
+
+module ImmGen(
+    input [31:0] inst,
+    output reg [31:0] imm
+);
+
+wire [6:0] opcode = inst[6:0];
+
+always @(*) begin
+    case (opcode)
+        7'b0010011: imm <= {{20{inst[31]}}, inst[31:20]}; // I-type instruction
+
+        7'b0100011: begin // S-type instruction
+            imm[31:12]<={20{inst[31]}};
+            imm[11:5] <= inst[31:25];
+            imm[4:0]  <= inst[11:7];
+        end
+
+        7'b1100011: begin // B-type instruction
+            imm[31:12]   <= {20{inst[31]}};
+            imm[10:5] <= inst[30:25];
+            imm[4:1]  <= inst[11:8];
+            imm[11]   <= inst[7];
+            imm[0]    <= 1'b0; // LSB is always 0 for branch offset
+        end
+
+        7'b1101111: begin // J-type instruction (JAL)
+            imm[31:13]<={19{inst[31]}};
+            imm[20]   <= inst[31];
+            imm[10:1] <= inst[30:21];
+            imm[11]   <= inst[20];
+            imm[19:12] <= inst[19:12];
+            imm[0]    <= 1'b0; // LSB is always 0 for jump offset
+        end
+
+        default: imm <= 32'b0; // Default case
+    endcase
+end
+
+endmodule
+
+
+module InstructionMemory (
+    input [31:0] readAddr,
+    output [31:0] inst
+);
+    
+    // Do not modify this file!
+
+    reg [7:0] insts [127:0];
+    
+    assign inst = (readAddr >= 128) ? 32'b0 : {insts[readAddr], insts[readAddr + 1], insts[readAddr + 2], insts[readAddr + 3]};
+
+    initial begin
+        insts[0] = 8'b0;  insts[1] = 8'b0;  insts[2] = 8'b0;  insts[3] = 8'b0;
+        insts[4] = 8'b0;  insts[5] = 8'b0;  insts[6] = 8'b0;  insts[7] = 8'b0;
+        insts[8] = 8'b0;  insts[9] = 8'b0;  insts[10] = 8'b0; insts[11] = 8'b0;
+        insts[12] = 8'b0; insts[13] = 8'b0; insts[14] = 8'b0; insts[15] = 8'b0;
+        insts[16] = 8'b0; insts[17] = 8'b0; insts[18] = 8'b0; insts[19] = 8'b0;
+        insts[20] = 8'b0; insts[21] = 8'b0; insts[22] = 8'b0; insts[23] = 8'b0;
+        insts[24] = 8'b0; insts[25] = 8'b0; insts[26] = 8'b0; insts[27] = 8'b0;
+        insts[28] = 8'b0; insts[29] = 8'b0; insts[30] = 8'b0; insts[31] = 8'b0;
+        $readmemb("C:/Users/megha/OneDrive/Documents/4th sem/iris/iris Hardware Labs recruitment Assignment I/TEST_INSTRUCTIONS.dat", insts);
+    end
+
+endmodule
+
+module Mux2to1 #(
+    parameter size = 32
+) 
+(
+    input sel,
+    input signed [size-1:0] s0,
+    input signed [size-1:0] s1,
+    output signed [size-1:0] out
+);
+    
+assign out = sel ? s1 : s0;
+    
+endmodule
+
+module PC (
+    input clk,
+    input rst,
+    input [31:0] pc_i,
+    output reg [31:0] pc_o
+);
+
+always @(posedge clk ) begin
+	if (~rst)
+		pc_o <=32'b0;
+	else
+		pc_o <= pc_i;
+end
+endmodule
+
+// Do not modify this file!
+
+module Register (
+    input clk,
+    input rst,
+    input regWrite,
+    input [4:0] readReg1,
+    input [4:0] readReg2,
+    input [4:0] writeReg,
+    input [31:0] writeData,
+    output [31:0] readData1,
+    output [31:0] readData2
+);
+    reg [31:0] regs [0:31];
+
+// Do not modify this file!
+    assign readData1 = (readReg1!=0)?regs[readReg1]:0;
+    assign readData2 = (readReg2!=0)?regs[readReg2]:0;
+     
+    always @(posedge clk) begin
+        if(~rst) begin
+            regs[0] <= 0; regs[1] <= 0; regs[2] <= 32'd128; regs[3] <= 0; 
+            regs[4] <= 0; regs[5] <= 0; regs[6] <= 0; regs[7] <= 0; 
+            regs[8] <= 0; regs[9] <= 0; regs[10] <= 0; regs[11] <= 0; 
+            regs[12] <= 0; regs[13] <= 0; regs[14] <= 0; regs[15] <= 0; 
+            regs[16] <= 0; regs[17] <= 0; regs[18] <= 0; regs[19] <= 0; 
+            regs[20] <= 0; regs[21] <= 0; regs[22] <= 0; regs[23] <= 0; 
+            regs[24] <= 0; regs[25] <= 0; regs[26] <= 0; regs[27] <= 0; 
+            regs[28] <= 0; regs[29] <= 0; regs[30] <= 0; regs[31] <= 0;        
+        end
+        else if(regWrite)
+            regs[writeReg] <= (writeReg == 0) ? 0 : writeData;
+    end
+
+endmodule
+
+module ShiftLeftOne (
+    input signed [31:0] i,
+    output signed [31:0] o
+);
+
+   assign o = i;
+
+endmodule
